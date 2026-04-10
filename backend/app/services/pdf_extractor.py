@@ -1,4 +1,8 @@
-"""Extract structured data from ANTT drainage monitoring PDFs using pdfplumber."""
+"""Extract structured data from ANTT drainage monitoring PDFs.
+
+Uses pdfplumber (table + text) when available, falls back to pdfminer.six (text only)
+for lightweight deployments (e.g. Vercel serverless).
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,13 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import pdfplumber
+try:
+    import pdfplumber
+    PDFPLUMBER_AVAILABLE = True
+except ImportError:
+    PDFPLUMBER_AVAILABLE = False
+
+from pdfminer.high_level import extract_text as pdfminer_extract_text
 
 from app.domain.drainage_record import DrainageRecord
 from app.services.field_parser import (
@@ -79,52 +89,70 @@ _LABEL_MAP: List[tuple] = [
 _TIPO_LABELS = ("TIPO",)
 
 
+def _extract_with_pdfplumber(pdf_path: Path) -> tuple:
+    """Extract using pdfplumber (table + text). Returns (merged_fields, warnings)."""
+    warnings: List[str] = []
+    filename = pdf_path.name
+
+    with pdfplumber.open(pdf_path) as pdf:
+        if not pdf.pages:
+            return {}, ["PDF sem páginas"]
+
+        page = pdf.pages[0]
+        table_fields = _extract_from_tables(page)
+        full_text = page.extract_text() or ""
+        text_fields = extract_fields_from_text(full_text)
+
+        merged = {**text_fields}
+        for key, val in table_fields.items():
+            if val:
+                merged[key] = val
+
+        # Check for Tipo separately (short label, needs care)
+        if not merged.get("tipo"):
+            for table in (page.extract_tables() if hasattr(page, 'extract_tables') else []):
+                for row in (table or []):
+                    cells = [c.strip() if c else "" for c in (row or [])]
+                    for i, cell in enumerate(cells):
+                        if cell.upper() in _TIPO_LABELS and len(cell) <= 6 and i + 1 < len(cells):
+                            merged["tipo"] = cells[i + 1]
+
+    return merged, warnings
+
+
+def _extract_with_pdfminer(pdf_path: Path) -> tuple:
+    """Extract using pdfminer.six (text only). Lighter fallback."""
+    full_text = pdfminer_extract_text(str(pdf_path))
+    if not full_text.strip():
+        return {}, ["PDF sem texto extraivel"]
+    merged = extract_fields_from_text(full_text)
+    return merged, []
+
+
 def extract_record(pdf_path: Path) -> DrainageRecord:
     """Extract a DrainageRecord from a single ANTT drainage monitoring PDF.
 
-    Strategy:
-    1. Try table extraction (most reliable for form-like PDFs)
-    2. Fall back to full-text regex extraction
-    3. Merge results (table values take priority)
+    Uses pdfplumber (table + text) when available, falls back to
+    pdfminer.six (text only) for lightweight deployments.
     """
     warnings: List[str] = []
     filename = pdf_path.name
 
     logger.info("Processando: %s", filename)
 
-    with pdfplumber.open(pdf_path) as pdf:
-        if not pdf.pages:
-            logger.warning("%s: PDF sem paginas", filename)
-            return DrainageRecord(
-                source_filename=filename,
-                confidence=0.0,
-                warnings=["PDF sem páginas"],
-            )
+    if PDFPLUMBER_AVAILABLE:
+        merged, extract_warnings = _extract_with_pdfplumber(pdf_path)
+    else:
+        merged, extract_warnings = _extract_with_pdfminer(pdf_path)
 
-        page = pdf.pages[0]
+    warnings.extend(extract_warnings)
 
-        # Strategy 1: Table extraction
-        table_fields = _extract_from_tables(page)
-
-        # Strategy 2: Full text regex
-        full_text = page.extract_text() or ""
-        logger.debug("%s: texto extraido (%d chars)", filename, len(full_text))
-        text_fields = extract_fields_from_text(full_text)
-
-        # Merge: table values take priority, text fills gaps
-        merged = {**text_fields}
-        for key, val in table_fields.items():
-            if val:
-                merged[key] = val
-
-    # Check for Tipo separately (short label, needs care)
-    if not merged.get("tipo"):
-        for table in (page.extract_tables() if hasattr(page, 'extract_tables') else []):
-            for row in (table or []):
-                cells = [c.strip() if c else "" for c in (row or [])]
-                for i, cell in enumerate(cells):
-                    if cell.upper() in _TIPO_LABELS and len(cell) <= 6 and i + 1 < len(cells):
-                        merged["tipo"] = cells[i + 1]
+    if not merged:
+        return DrainageRecord(
+            source_filename=filename,
+            confidence=0.0,
+            warnings=warnings or ["PDF sem dados extraiveis"],
+        )
 
     # Build the record
     confidence = compute_confidence(merged)
