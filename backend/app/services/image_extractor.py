@@ -206,7 +206,7 @@ def extract_record_from_image(image_path: Path) -> DrainageRecord:
         return DrainageRecord(
             source_filename=filename,
             confidence=0.0,
-            warnings=["OCR indisponivel neste ambiente (pytesseract/Pillow nao instalado)"],
+            warnings=["Imagens requerem OCR (Tesseract) que nao esta disponivel neste servidor. Envie arquivos PDF ou execute a aplicacao localmente."],
         )
 
     logger.info("Processando imagem (OCR): %s", filename)

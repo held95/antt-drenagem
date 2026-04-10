@@ -54,9 +54,15 @@ def _process_single_file(file_path: Path) -> FileResult:
             record = extract_record_from_image(file_path)
         else:
             record = extract_record(file_path)
-        result.record = record
-        result.warnings = record.warnings
-        result.status = "success"
+
+        # Mark as error if extraction yielded no usable data
+        if record.confidence == 0.0 and not record.km_inicial:
+            result.status = "error"
+            result.error = record.warnings[0] if record.warnings else "Nenhum dado extraido"
+        else:
+            result.record = record
+            result.warnings = record.warnings
+            result.status = "success"
     except Exception as e:
         logger.exception("Erro processando %s", file_path.name)
         result.status = "error"
