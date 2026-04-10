@@ -116,8 +116,11 @@ def _extract_with_pdfplumber(pdf_path: Path) -> tuple:
             for row in (table or []):
                 cells = [c.strip() if c else "" for c in (row or [])]
                 for i, cell in enumerate(cells):
-                    if cell.upper() in _TIPO_LABELS and len(cell) <= 6 and i + 1 < len(cells) and cells[i + 1]:
-                        merged["tipo"] = cells[i + 1]
+                    if cell.upper() in _TIPO_LABELS and len(cell) <= 6:
+                        for j in range(i + 1, min(len(cells), i + 3)):
+                            if cells[j] and re.match(r"MF?C", cells[j], re.IGNORECASE):
+                                merged["tipo"] = cells[j]
+                                break
 
     return merged, warnings
 
