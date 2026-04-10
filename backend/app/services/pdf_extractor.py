@@ -7,6 +7,7 @@ for lightweight deployments (e.g. Vercel serverless).
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -17,6 +18,7 @@ except ImportError:
     PDFPLUMBER_AVAILABLE = False
 
 from pdfminer.high_level import extract_text as pdfminer_extract_text
+from pdfminer.layout import LAParams
 
 from app.domain.drainage_record import DrainageRecord
 from app.services.field_parser import (
@@ -121,12 +123,139 @@ def _extract_with_pdfplumber(pdf_path: Path) -> tuple:
 
 
 def _extract_with_pdfminer(pdf_path: Path) -> tuple:
-    """Extract using pdfminer.six (text only). Lighter fallback."""
-    full_text = pdfminer_extract_text(str(pdf_path))
-    if not full_text.strip():
+    """Extract using pdfminer.six with multiple layout strategies.
+
+    pdfminer.six extracts text differently than pdfplumber — form fields
+    often end up on separate lines. We try multiple LAParams configs and
+    use both standard + label-based extraction to maximize field capture.
+    """
+    # Strategy 1: tight layout (good for forms where labels and values are close)
+    laparams_tight = LAParams(
+        line_margin=0.3,
+        word_margin=0.1,
+        char_margin=2.0,
+        boxes_flow=0.5,
+    )
+    # Strategy 2: default layout
+    laparams_default = LAParams()
+
+    # Strategy 3: wide layout (good for two-column forms)
+    laparams_wide = LAParams(
+        line_margin=0.5,
+        word_margin=0.2,
+        char_margin=3.0,
+        boxes_flow=None,  # Use exact positioning
+    )
+
+    texts = []
+    for lp in [laparams_tight, laparams_default, laparams_wide]:
+        try:
+            text = pdfminer_extract_text(str(pdf_path), laparams=lp)
+            if text.strip():
+                texts.append(text)
+        except Exception as e:
+            logger.debug("pdfminer extraction failed with params: %s", e)
+
+    if not texts:
         return {}, ["PDF sem texto extraivel"]
-    merged = extract_fields_from_text(full_text)
-    return merged, []
+
+    # Try standard regex on each text variant, keep the one with most fields
+    best_merged: Dict[str, Optional[str]] = {}
+    best_count = 0
+
+    for text in texts:
+        # Standard field_parser regex
+        fields = extract_fields_from_text(text)
+        count = sum(1 for v in fields.values() if v)
+        if count > best_count:
+            best_count = count
+            best_merged = fields
+
+    # Supplement with label-based extraction across ALL text variants
+    combined_text = "\n".join(texts)
+    label_fields = _extract_labels_from_text(combined_text)
+    for key, val in label_fields.items():
+        if val and not best_merged.get(key):
+            best_merged[key] = val
+
+    # Supplement with standalone keyword fallbacks
+    fallback_fields = _extract_standalone_values(combined_text)
+    for key, val in fallback_fields.items():
+        if val and not best_merged.get(key):
+            best_merged[key] = val
+
+    return best_merged, []
+
+
+# Label patterns for pdfminer text where label and value may be on same or different lines
+_PDFMINER_LABEL_PATTERNS: List[tuple] = [
+    ("km_inicial", re.compile(r"KM\s*INICIAL\s*[:\s]*([\d]+\+[\d]+)", re.IGNORECASE)),
+    ("km_final", re.compile(r"KM\s*FINAL\s*[:\s]*([\d]+\+[\d]+)", re.IGNORECASE)),
+    ("extensao", re.compile(r"EXTENS[ÃA]O\s*\(?m?\)?\s*[:\s]*([\d.,]+)", re.IGNORECASE)),
+    ("largura", re.compile(r"Largura\s*\(?m?\)?\s*[:\s]*([\d.,]+)", re.IGNORECASE)),
+    ("altura", re.compile(r"Altura\s*\(?m?\)?\s*[:\s]*([\d.,]+)", re.IGNORECASE)),
+    ("coord_x_inicio", re.compile(r"In[ií]cio\s*Coordenada\s*X\s*[:\s]*([-\d.,]+)", re.IGNORECASE)),
+    ("coord_y_inicio", re.compile(r"In[ií]cio\s*Coordenada\s*Y\s*[:\s]*([-\d.,]+)", re.IGNORECASE)),
+    ("coord_x_fim", re.compile(r"Fim\s*Coordenada\s*X\s*[:\s]*([-\d.,]+)", re.IGNORECASE)),
+    ("coord_y_fim", re.compile(r"Fim\s*Coordenada\s*Y\s*[:\s]*([-\d.,]+)", re.IGNORECASE)),
+    ("estado_conservacao", re.compile(
+        r"(?:Estado\s*de\s*)?Conserva[çc][ãa]o\s*[:\s]*(REGULAR|PREC[ÁA]RIO|BOM|RUIM|NOVO|P[ÉE]SSIMO)",
+        re.IGNORECASE,
+    )),
+    ("ambiente", re.compile(r"Ambiente\s*[:\s]*(URBANO|RURAL)", re.IGNORECASE)),
+    ("material", re.compile(r"Material\s*[:\s]*(CONCRETO|ALVENARIA|METAL\w*|PEDRA|PVC)", re.IGNORECASE)),
+    ("tipo", re.compile(r"Tipo\s*[:\s]*(MF?C\s*[/\s]?\s*[A-Za-z0-9]{1,5})", re.IGNORECASE)),
+    ("inspection_date", re.compile(r"Data\s*[Ii]nsp\.?\s*[:\s]*([\d]{1,2}[/\-][\d]{1,2}[/\-][\d]{2,4})", re.IGNORECASE)),
+    ("identificacao", re.compile(r"IDENTIFICA[ÇC][ÃA]O\s*[:\s]*(MF\s*381\s*MG\s*[\d+]+\s*L?\s*\d?)", re.IGNORECASE)),
+    ("reparar", re.compile(r"Reparar\s*[:\s]*(Sim|N[ãa]o)", re.IGNORECASE)),
+    ("limpeza", re.compile(r"Limpeza\s*[:\s]*(Sim|N[ãa]o)", re.IGNORECASE)),
+    ("implantar", re.compile(r"Implantar\s*[:\s]*(Sim|N[ãa]o)", re.IGNORECASE)),
+]
+
+
+def _extract_labels_from_text(text: str) -> Dict[str, Optional[str]]:
+    """Extract fields using label-based patterns that handle multi-line text."""
+    fields: Dict[str, Optional[str]] = {}
+    for field_name, pattern in _PDFMINER_LABEL_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            fields[field_name] = match.group(1).strip()
+    return fields
+
+
+def _extract_standalone_values(text: str) -> Dict[str, Optional[str]]:
+    """Extract fields by finding standalone enum values and distinctive patterns."""
+    fields: Dict[str, Optional[str]] = {}
+
+    # Standalone enum values
+    for key, pattern in [
+        ("estado_conservacao", re.compile(r"\b(REGULAR|PREC[ÁA]RIO|P[ÉE]SSIMO|BOM|RUIM|NOVO)\b", re.IGNORECASE)),
+        ("ambiente", re.compile(r"\b(URBANO|RURAL)\b", re.IGNORECASE)),
+        ("material", re.compile(r"\b(CONCRETO|ALVENARIA)\b", re.IGNORECASE)),
+    ]:
+        match = pattern.search(text)
+        if match:
+            fields[key] = match.group(1).strip()
+
+    # MFC type codes
+    match = re.search(r"\b(MF?C\s*[/\s.]?\s*[A-Za-z0-9]{1,5})\b", text, re.IGNORECASE)
+    if match:
+        fields["tipo"] = match.group(1).strip()
+
+    # KM patterns (NNN+NNN)
+    km_matches = re.findall(r"\b(\d{3}\+\d{3})\b", text)
+    unique_kms = list(dict.fromkeys(km_matches))
+    if unique_kms:
+        fields["km_inicial"] = unique_kms[0]
+    if len(unique_kms) >= 2:
+        fields["km_final"] = unique_kms[1]
+
+    # MF 381 MG identification pattern
+    match = re.search(r"(MF\s*381\s*MG\s*\d{2,3}\+\d{2,3}\s*L?\s*\d?)", text, re.IGNORECASE)
+    if match:
+        fields["identificacao"] = match.group(1).strip()
+
+    return fields
 
 
 def extract_record(pdf_path: Path) -> DrainageRecord:
