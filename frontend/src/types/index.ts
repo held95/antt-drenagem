@@ -1,9 +1,3 @@
-export interface UploadResponse {
-  job_id: string;
-  file_count: number;
-  status: string;
-}
-
 export interface FileResult {
   filename: string;
   status: string;
@@ -11,13 +5,11 @@ export interface FileResult {
   error: string | null;
 }
 
-export interface JobStatus {
-  job_id: string;
-  status: string;
+export interface ProcessResponse {
   total_files: number;
-  processed_files: number;
+  successful_files: number;
   files: FileResult[];
-  download_ready: boolean;
+  excel_base64: string | null;
 }
 
-export type AppState = "idle" | "uploading" | "processing" | "completed" | "error";
+export type AppState = "idle" | "processing" | "completed" | "error";

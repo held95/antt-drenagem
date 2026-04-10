@@ -1,21 +1,33 @@
 import { AlertTriangle, CheckCircle, Loader2, XCircle } from "lucide-react";
-import type { JobStatus } from "../../types";
+import type { ProcessResponse } from "../../types";
 import { cn } from "../../lib/cn";
 
 interface ProcessingStatusProps {
-  jobStatus: JobStatus;
+  result: ProcessResponse | null;
+  isProcessing: boolean;
 }
 
-export function ProcessingStatus({ jobStatus }: ProcessingStatusProps) {
-  const { status, total_files, processed_files, files } = jobStatus;
-  const percent =
-    total_files > 0 ? Math.round((processed_files / total_files) * 100) : 0;
+export function ProcessingStatus({ result, isProcessing }: ProcessingStatusProps) {
+  if (isProcessing) {
+    return (
+      <div className="rounded-xl border border-gray-200 bg-white p-6">
+        <div className="flex flex-col items-center gap-3 py-4">
+          <Loader2 className="h-10 w-10 animate-spin text-primary" />
+          <p className="text-sm font-medium text-gray-700">
+            Processando arquivos... Isso pode levar alguns segundos.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
-  const isProcessing = status === "processing";
-  const isCompleted = status === "completed";
-  const isError = status === "error";
+  if (!result) return null;
 
-  const successCount = files.filter((f) => f.status === "success").length;
+  const { total_files, successful_files, files } = result;
+  const percent = total_files > 0 ? Math.round((successful_files / total_files) * 100) : 0;
+  const isCompleted = successful_files > 0;
+  const isError = successful_files === 0;
+
   const errorCount = files.filter((f) => f.status === "error").length;
   const warningCount = files.filter(
     (f) => f.warnings && f.warnings.length > 0
@@ -27,28 +39,22 @@ export function ProcessingStatus({ jobStatus }: ProcessingStatusProps) {
       <div className="mb-4">
         <div className="mb-2 flex items-center justify-between">
           <span className="flex items-center gap-2 text-sm font-medium text-gray-700">
-            {isProcessing && (
-              <Loader2 className="h-4 w-4 animate-spin text-primary" />
-            )}
-            {isCompleted && (
+            {isCompleted ? (
               <CheckCircle className="h-4 w-4 text-success" />
+            ) : (
+              <XCircle className="h-4 w-4 text-danger" />
             )}
-            {isError && <XCircle className="h-4 w-4 text-danger" />}
-            {isProcessing
-              ? "Processando..."
-              : isCompleted
-                ? "Concluído"
-                : "Erro"}
+            {isCompleted ? "Concluído" : "Erro"}
           </span>
           <span className="text-sm text-gray-500">
-            {processed_files}/{total_files} ({percent}%)
+            {successful_files}/{total_files} ({percent}%)
           </span>
         </div>
         <div className="h-3 w-full overflow-hidden rounded-full bg-gray-200">
           <div
             className={cn(
               "h-full rounded-full transition-all duration-300",
-              isError ? "bg-danger" : isCompleted ? "bg-success" : "bg-primary"
+              isError ? "bg-danger" : "bg-success"
             )}
             style={{ width: `${percent}%` }}
           />
@@ -59,7 +65,7 @@ export function ProcessingStatus({ jobStatus }: ProcessingStatusProps) {
       <div className="flex gap-4 text-sm">
         <span className="flex items-center gap-1 text-success">
           <CheckCircle className="h-3.5 w-3.5" />
-          {successCount} sucesso
+          {successful_files} sucesso
         </span>
         {warningCount > 0 && (
           <span className="flex items-center gap-1 text-warning">

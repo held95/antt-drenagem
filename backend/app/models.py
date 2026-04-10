@@ -25,3 +25,11 @@ class JobStatusResponse(BaseModel):
     processed_files: int
     files: List[FileResultResponse]
     download_ready: bool
+
+
+class ProcessResponse(BaseModel):
+    """Synchronous processing response (serverless-compatible)."""
+    total_files: int
+    successful_files: int
+    files: List[FileResultResponse]
+    excel_base64: Optional[str] = None
