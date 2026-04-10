@@ -1,24 +1,27 @@
-"""Extract structured data from ANTT drainage monitoring images using OCR (Tesseract).
+"""Extract structured data from ANTT drainage monitoring images using OCR.
 
-Uses a multi-pass OCR strategy with different preprocessing settings to maximize
-text extraction quality, especially for photos of screens or low-quality scans.
-Also includes OCR-tolerant regex patterns that complement the standard field_parser.
+Uses local Tesseract when available, falls back to OCR.space cloud API
+for serverless deployments (Vercel).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 try:
     import pytesseract
     from PIL import Image, ImageEnhance, ImageFilter
-    OCR_AVAILABLE = True
+    TESSERACT_AVAILABLE = True
 except ImportError:
-    OCR_AVAILABLE = False
+    TESSERACT_AVAILABLE = False
 
+from app.config import settings
 from app.domain.drainage_record import DrainageRecord
 from app.services.field_parser import (
     compute_confidence,
@@ -34,11 +37,83 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Image preprocessing variants
+# OCR.space Cloud API (fallback when Tesseract is not installed)
 # ---------------------------------------------------------------------------
 
-def _prep_binarize(img: Image.Image) -> Image.Image:
-    """Grayscale + contrast + binarize — best for high-contrast forms."""
+def _ocr_via_api(image_path: Path) -> str:
+    """Send image to OCR.space free API and return extracted text."""
+    api_key = settings.ocr_space_api_key
+    if not api_key:
+        logger.error("OCR_SPACE_API_KEY nao configurada")
+        return ""
+
+    url = "https://api.ocr.space/parse/image"
+    file_bytes = image_path.read_bytes()
+    filename = image_path.name
+
+    # Build multipart/form-data manually (no extra dependencies)
+    boundary = "----PythonFormBoundary7MA4YWxkTrZu0gW"
+    body = b""
+
+    # API key field
+    body += ("--{}\r\n".format(boundary)).encode()
+    body += b"Content-Disposition: form-data; name=\"apikey\"\r\n\r\n"
+    body += api_key.encode() + b"\r\n"
+
+    # Language
+    body += ("--{}\r\n".format(boundary)).encode()
+    body += b"Content-Disposition: form-data; name=\"language\"\r\n\r\n"
+    body += b"por\r\n"
+
+    # Scale (better for small text)
+    body += ("--{}\r\n".format(boundary)).encode()
+    body += b"Content-Disposition: form-data; name=\"scale\"\r\n\r\n"
+    body += b"true\r\n"
+
+    # Detect orientation
+    body += ("--{}\r\n".format(boundary)).encode()
+    body += b"Content-Disposition: form-data; name=\"detectOrientation\"\r\n\r\n"
+    body += b"true\r\n"
+
+    # File
+    body += ("--{}\r\n".format(boundary)).encode()
+    body += 'Content-Disposition: form-data; name="file"; filename="{}"\r\n'.format(filename).encode()
+    body += b"Content-Type: application/octet-stream\r\n\r\n"
+    body += file_bytes + b"\r\n"
+
+    body += ("--{}--\r\n".format(boundary)).encode()
+
+    headers = {
+        "Content-Type": "multipart/form-data; boundary={}".format(boundary),
+    }
+
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+        logger.error("OCR.space API falhou: %s", e)
+        return ""
+
+    if data.get("IsErroredOnProcessing"):
+        error_msg = data.get("ErrorMessage", ["Erro desconhecido"])
+        logger.error("OCR.space erro: %s", error_msg)
+        return ""
+
+    # Combine text from all parsed results
+    texts = []
+    for result in data.get("ParsedResults", []):
+        texts.append(result.get("ParsedText", ""))
+
+    return "\n".join(texts)
+
+
+# ---------------------------------------------------------------------------
+# Local Tesseract preprocessing + multi-pass
+# ---------------------------------------------------------------------------
+
+def _prep_binarize(img: "Image.Image") -> "Image.Image":
     if img.mode != "L":
         img = img.convert("L")
     img = ImageEnhance.Contrast(img).enhance(2.0)
@@ -47,8 +122,7 @@ def _prep_binarize(img: Image.Image) -> Image.Image:
     return img
 
 
-def _prep_grayscale(img: Image.Image) -> Image.Image:
-    """Grayscale + contrast + sharpen, no binarization — best for photos."""
+def _prep_grayscale(img: "Image.Image") -> "Image.Image":
     if img.mode != "L":
         img = img.convert("L")
     img = ImageEnhance.Contrast(img).enhance(1.5)
@@ -56,105 +130,17 @@ def _prep_grayscale(img: Image.Image) -> Image.Image:
     return img
 
 
-def _prep_color(img: Image.Image) -> Image.Image:
-    """Keep color, just sharpen — sometimes Tesseract handles color better."""
+def _prep_color(img: "Image.Image") -> "Image.Image":
     if img.mode not in ("RGB",):
         img = img.convert("RGB")
     img = ImageEnhance.Sharpness(img).enhance(1.5)
     return img
 
 
-# ---------------------------------------------------------------------------
-# OCR-tolerant regex patterns (supplement field_parser patterns)
-# ---------------------------------------------------------------------------
-
-# These patterns handle common OCR misreads while keeping specificity.
-OCR_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
-    # KM markers: look for the distinctive NNN+NNN pattern near KM/INICIAL/FINAL
-    ("km_inicial", re.compile(r"(?:KM|km|Km).?(?:INICIAL|INIC\w*|IN\w*)\s*[:\|]?\s*(\d{2,3}\+\d{2,3})", re.IGNORECASE)),
-    ("km_final", re.compile(r"(?:KM|km|Km).?(?:FINAL|FIN\w*)\s*[:\|]?\s*(\d{2,3}\+\d{2,3})", re.IGNORECASE)),
-    # Extensao: OCR may garble the label but value pattern is distinctive
-    ("extensao", re.compile(r"[EÉe]xt?ens\w*\s*\(?m?\)?\s*[:\|]?\s*([\d.,]+)", re.IGNORECASE)),
-    # Largura
-    ("largura", re.compile(r"[Ll]argura\s*\(?m?\)?\s*[:\|]?\s*([\d.,]+)", re.IGNORECASE)),
-    # Altura
-    ("altura", re.compile(r"[Aa]ltura\s*\(?m?\)?\s*[:\|]?\s*([\d.,]+)", re.IGNORECASE)),
-    # Coordinates — very tolerant label matching
-    ("coord_x_inicio", re.compile(r"[Ii]n\w{0,6}\s*[CcGg]oord\w*\s*[Xx]\s*[:\|]?\s*([-\d.,]+)", re.IGNORECASE)),
-    ("coord_y_inicio", re.compile(r"[Ii]n\w{0,6}\s*[CcGg]oord\w*\s*[Yy]\s*[:\|]?\s*([-\d.,]+)", re.IGNORECASE)),
-    ("coord_x_fim", re.compile(r"[Ff]im\s*[CcGg]oord\w*\s*[Xx]\s*[:\|]?\s*([-\d.,]+)", re.IGNORECASE)),
-    ("coord_y_fim", re.compile(r"[Ff]im\s*[CcGg]oord\w*\s*[Yy]\s*[:\|]?\s*([-\d.,]+)", re.IGNORECASE)),
-    # Estado de Conservação — look for keyword values anywhere (very OCR-tolerant)
-    ("estado_conservacao", re.compile(
-        r"(?:[Cc]onserv|[Cc]omerv|[Cc]onierv)\w*\s*[:\|]?\s*(REGULAR|PREC[ÁA]RIO|BOM|RUIM|NOVO|P[ÉE]SSIMO)",
-        re.IGNORECASE,
-    )),
-    # Ambiente — look for URBANO/RURAL near "Amb" or standalone
-    ("ambiente", re.compile(r"[Aa]mb\w*\s*[:\|]?\s*(URBANO|RURAL)", re.IGNORECASE)),
-    # Material — very tolerant
-    ("material", re.compile(r"[Mm]at\w*[li]a[li]\s*[:\|]?\s*(CONCRETO|ALVENARIA|METAL\w*|PEDRA|PVC)", re.IGNORECASE)),
-    # Tipo — look for MFC pattern which is distinctive
-    ("tipo", re.compile(r"[Tt]i[op][eo]\s*[:\|]?\s*([A-Za-z]{2,4}[/\s]?[A-Za-z0-9]{1,4})", re.IGNORECASE)),
-    # Identificação — look for MF 381 MG pattern (very distinctive)
-    ("identificacao", re.compile(r"(MF\s*381\s*MG\s*\d{2,3}\+\d{2,3}\s*L?\s*\d?)", re.IGNORECASE)),
-    # Date pattern — more flexible
-    ("inspection_date", re.compile(r"(?:Data|Insp|ata)\w*\.?\s*[:\|\]]?\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", re.IGNORECASE)),
-    # Diagnostics
-    ("reparar", re.compile(r"[Rr]eparar\s*[:\|]?\s*(Sim|S[iI1]m|N[ãaÃA]o|Nao)", re.IGNORECASE)),
-    ("limpeza", re.compile(r"[Ll]impeza\s*[:\|]?\s*(Sim|S[iI1]m|N[ãaÃA]o|Nao)", re.IGNORECASE)),
-    ("implantar", re.compile(r"[Ii]mplantar\s*[:\|]?\s*(Sim|S[iI1]m|N[ãaÃA]o|Nao)", re.IGNORECASE)),
-]
-
-# Fallback: standalone keyword patterns — used when labels are completely garbled
-# These match enum values that are very unlikely to appear as OCR noise
-OCR_FALLBACK_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
-    ("estado_conservacao", re.compile(r"\b(REGULAR|PREC[ÁA]RIO|P[ÉE]SSIMO)\b", re.IGNORECASE)),
-    ("ambiente", re.compile(r"\b(URBANO|RURAL)\b")),
-    ("material", re.compile(r"\b(CONCRETO|ALVENARIA)\b")),
-    # MFC/XXX type codes
-    ("tipo", re.compile(r"\b(MFC\s*[/\s]?\s*[A-Za-z0-9]{1,4})\b", re.IGNORECASE)),
-    # NNN+NNN km patterns (first occurrence likely km_inicial)
-    ("km_inicial", re.compile(r"\b(\d{3}\+\d{3})\b")),
-]
-
-
-def _extract_ocr_fields(text: str) -> Dict[str, Optional[str]]:
-    """Extract fields using OCR-tolerant patterns, with fallback for garbled labels."""
-    fields: Dict[str, Optional[str]] = {}
-
-    # Primary OCR patterns (label-based, but more tolerant)
-    for field_name, pattern in OCR_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            fields[field_name] = match.group(1).strip()
-
-    # Fallback: standalone keyword matching for fields not yet found
-    for field_name, pattern in OCR_FALLBACK_PATTERNS:
-        if not fields.get(field_name):
-            match = pattern.search(text)
-            if match:
-                fields[field_name] = match.group(1).strip()
-
-    # Special: find second km pattern for km_final if km_inicial was found
-    if fields.get("km_inicial") and not fields.get("km_final"):
-        km_pattern = re.compile(r"\b(\d{3}\+\d{3})\b")
-        all_kms = km_pattern.findall(text)
-        unique_kms = list(dict.fromkeys(all_kms))  # preserve order, deduplicate
-        if len(unique_kms) >= 2 and unique_kms[0] == fields["km_inicial"]:
-            fields["km_final"] = unique_kms[1]
-
-    return fields
-
-
-# ---------------------------------------------------------------------------
-# Multi-pass OCR
-# ---------------------------------------------------------------------------
-
 def _ocr_multipass(image_path: Path) -> str:
     """Run Tesseract with multiple preprocessing variants, return combined text."""
     img = Image.open(image_path)
 
-    # Ensure minimum resolution for OCR
     min_width = 2000
     if img.width < min_width:
         scale = min_width / img.width
@@ -166,13 +152,11 @@ def _ocr_multipass(image_path: Path) -> str:
     lang = "por+eng"
     texts: List[str] = []
 
-    preprocess_configs = [
+    for prep_fn, psm_config in [
         (_prep_binarize, "--psm 6"),
         (_prep_grayscale, "--psm 3"),
         (_prep_color, "--psm 6"),
-    ]
-
-    for prep_fn, psm_config in preprocess_configs:
+    ]:
         processed = prep_fn(img.copy())
         try:
             text = pytesseract.image_to_string(processed, lang=lang, config=psm_config)
@@ -183,52 +167,82 @@ def _ocr_multipass(image_path: Path) -> str:
                 text = ""
         texts.append(text)
 
-    # Combine all texts (separated by newlines)
-    combined = "\n".join(texts)
-    return combined
+    return "\n".join(texts)
 
 
-def extract_record_from_image(image_path: Path) -> DrainageRecord:
-    """Extract a DrainageRecord from a JPEG/PNG image of an ANTT drainage form.
+# ---------------------------------------------------------------------------
+# OCR-tolerant regex patterns
+# ---------------------------------------------------------------------------
 
-    Strategy:
-    1. Run OCR with multiple preprocessing variants (multi-pass)
-    2. Apply standard regex extraction from field_parser
-    3. Apply OCR-tolerant regex patterns as supplement
-    4. Merge results (standard patterns take priority, OCR patterns fill gaps)
-    5. Normalize and validate extracted values
-    """
+OCR_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
+    ("km_inicial", re.compile(r"(?:KM|km|Km).?(?:INICIAL|INIC\w*|IN\w*)\s*[:\|]?\s*(\d{2,3}\+\d{2,3})", re.IGNORECASE)),
+    ("km_final", re.compile(r"(?:KM|km|Km).?(?:FINAL|FIN\w*)\s*[:\|]?\s*(\d{2,3}\+\d{2,3})", re.IGNORECASE)),
+    ("extensao", re.compile(r"[EÉe]xt?ens\w*\s*\(?m?\)?\s*[:\|]?\s*([\d.,]+)", re.IGNORECASE)),
+    ("largura", re.compile(r"[Ll]argura\s*\(?m?\)?\s*[:\|]?\s*([\d.,]+)", re.IGNORECASE)),
+    ("altura", re.compile(r"[Aa]ltura\s*\(?m?\)?\s*[:\|]?\s*([\d.,]+)", re.IGNORECASE)),
+    ("coord_x_inicio", re.compile(r"[Ii]n\w{0,6}\s*[CcGg]oord\w*\s*[Xx]\s*[:\|]?\s*([-\d.,]+)", re.IGNORECASE)),
+    ("coord_y_inicio", re.compile(r"[Ii]n\w{0,6}\s*[CcGg]oord\w*\s*[Yy]\s*[:\|]?\s*([-\d.,]+)", re.IGNORECASE)),
+    ("coord_x_fim", re.compile(r"[Ff]im\s*[CcGg]oord\w*\s*[Xx]\s*[:\|]?\s*([-\d.,]+)", re.IGNORECASE)),
+    ("coord_y_fim", re.compile(r"[Ff]im\s*[CcGg]oord\w*\s*[Yy]\s*[:\|]?\s*([-\d.,]+)", re.IGNORECASE)),
+    ("estado_conservacao", re.compile(
+        r"(?:[Cc]onserv|[Cc]omerv|[Cc]onierv)\w*\s*[:\|]?\s*(REGULAR|PREC[ÁA]RIO|BOM|RUIM|NOVO|P[ÉE]SSIMO)",
+        re.IGNORECASE,
+    )),
+    ("ambiente", re.compile(r"[Aa]mb\w*\s*[:\|]?\s*(URBANO|RURAL)", re.IGNORECASE)),
+    ("material", re.compile(r"[Mm]at\w*[li]a[li]\s*[:\|]?\s*(CONCRETO|ALVENARIA|METAL\w*|PEDRA|PVC)", re.IGNORECASE)),
+    ("tipo", re.compile(r"[Tt]i[op][eo]\s*[:\|]?\s*([A-Za-z]{2,4}[/\s]?[A-Za-z0-9]{1,4})", re.IGNORECASE)),
+    ("identificacao", re.compile(r"(MF\s*381\s*MG\s*\d{2,3}\+\d{2,3}\s*L?\s*\d?)", re.IGNORECASE)),
+    ("inspection_date", re.compile(r"(?:Data|Insp|ata)\w*\.?\s*[:\|\]]?\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", re.IGNORECASE)),
+    ("reparar", re.compile(r"[Rr]eparar\s*[:\|]?\s*(Sim|S[iI1]m|N[ãaÃA]o|Nao)", re.IGNORECASE)),
+    ("limpeza", re.compile(r"[Ll]impeza\s*[:\|]?\s*(Sim|S[iI1]m|N[ãaÃA]o|Nao)", re.IGNORECASE)),
+    ("implantar", re.compile(r"[Ii]mplantar\s*[:\|]?\s*(Sim|S[iI1]m|N[ãaÃA]o|Nao)", re.IGNORECASE)),
+]
+
+OCR_FALLBACK_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
+    ("estado_conservacao", re.compile(r"\b(REGULAR|PREC[ÁA]RIO|P[ÉE]SSIMO)\b", re.IGNORECASE)),
+    ("ambiente", re.compile(r"\b(URBANO|RURAL)\b")),
+    ("material", re.compile(r"\b(CONCRETO|ALVENARIA)\b")),
+    ("tipo", re.compile(r"\b(MFC\s*[/\s]?\s*[A-Za-z0-9]{1,4})\b", re.IGNORECASE)),
+    ("km_inicial", re.compile(r"\b(\d{3}\+\d{3})\b")),
+]
+
+
+def _extract_ocr_fields(text: str) -> Dict[str, Optional[str]]:
+    """Extract fields using OCR-tolerant patterns."""
+    fields: Dict[str, Optional[str]] = {}
+
+    for field_name, pattern in OCR_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            fields[field_name] = match.group(1).strip()
+
+    for field_name, pattern in OCR_FALLBACK_PATTERNS:
+        if not fields.get(field_name):
+            match = pattern.search(text)
+            if match:
+                fields[field_name] = match.group(1).strip()
+
+    if fields.get("km_inicial") and not fields.get("km_final"):
+        km_pattern = re.compile(r"\b(\d{3}\+\d{3})\b")
+        all_kms = km_pattern.findall(text)
+        unique_kms = list(dict.fromkeys(all_kms))
+        if len(unique_kms) >= 2 and unique_kms[0] == fields["km_inicial"]:
+            fields["km_final"] = unique_kms[1]
+
+    return fields
+
+
+# ---------------------------------------------------------------------------
+# Main extraction function
+# ---------------------------------------------------------------------------
+
+def _build_record(filename: str, full_text: str) -> DrainageRecord:
+    """Build a DrainageRecord from OCR-extracted text."""
     warnings: List[str] = []
-    filename = image_path.name
 
-    if not OCR_AVAILABLE:
-        logger.error("pytesseract/Pillow nao instalado — OCR indisponivel")
-        return DrainageRecord(
-            source_filename=filename,
-            confidence=0.0,
-            warnings=["Imagens requerem OCR (Tesseract) que nao esta disponivel neste servidor. Envie arquivos PDF ou execute a aplicacao localmente."],
-        )
-
-    logger.info("Processando imagem (OCR): %s", filename)
-
-    full_text = _ocr_multipass(image_path)
-    logger.debug("%s: texto OCR combinado (%d chars)", filename, len(full_text))
-
-    if not full_text.strip():
-        logger.warning("%s: OCR nao extraiu texto", filename)
-        return DrainageRecord(
-            source_filename=filename,
-            confidence=0.0,
-            warnings=["OCR nao conseguiu extrair texto da imagem"],
-        )
-
-    # Strategy 1: Standard field_parser regex (designed for clean PDF text)
     standard_fields = extract_fields_from_text(full_text)
-
-    # Strategy 2: OCR-tolerant regex patterns
     ocr_fields = _extract_ocr_fields(full_text)
 
-    # Merge: standard patterns take priority, OCR patterns fill gaps
     merged: Dict[str, Optional[str]] = {}
     all_keys = set(list(standard_fields.keys()) + list(ocr_fields.keys()))
     for key in all_keys:
@@ -236,24 +250,20 @@ def extract_record_from_image(image_path: Path) -> DrainageRecord:
         ocr_val = ocr_fields.get(key)
         merged[key] = std_val if std_val else ocr_val
 
-    # Build the record
     confidence = compute_confidence(merged)
     if confidence < 0.5:
         warnings.append(
             "Baixa confianca na extracao OCR ({:.0%}) — verifique manualmente".format(confidence)
         )
 
-    # Parse coordinates
     lat_inicio = normalize_coordinate(parse_brazilian_float(merged.get("coord_x_inicio")))
     lon_inicio = normalize_coordinate(parse_brazilian_float(merged.get("coord_y_inicio")))
     lat_fim = normalize_coordinate(parse_brazilian_float(merged.get("coord_x_fim")))
     lon_fim = normalize_coordinate(parse_brazilian_float(merged.get("coord_y_fim")))
 
-    # Validate coordinates are within Brazil
     warnings.extend(validate_brazil_coordinate(lat_inicio, lon_inicio))
     warnings.extend(validate_brazil_coordinate(lat_fim, lon_fim))
 
-    # Derive estaca from identification number, fallback to km
     identificacao = merged.get("identificacao")
     km_inicial = merged.get("km_inicial")
     km_final = merged.get("km_final")
@@ -291,4 +301,34 @@ def extract_record_from_image(image_path: Path) -> DrainageRecord:
         implantar=parse_sim_nao(merged.get("implantar")),
         confidence=confidence,
         warnings=warnings,
+    )
+
+
+def extract_record_from_image(image_path: Path) -> DrainageRecord:
+    """Extract a DrainageRecord from a JPEG/PNG image of an ANTT drainage form.
+
+    Uses local Tesseract (multi-pass) when available.
+    Falls back to OCR.space cloud API for serverless environments.
+    """
+    filename = image_path.name
+    logger.info("Processando imagem (OCR): %s", filename)
+
+    # Strategy 1: Local Tesseract (best quality, multi-pass)
+    if TESSERACT_AVAILABLE:
+        full_text = _ocr_multipass(image_path)
+        if full_text.strip():
+            return _build_record(filename, full_text)
+
+    # Strategy 2: OCR.space cloud API
+    if settings.ocr_space_api_key:
+        logger.info("%s: usando OCR.space API", filename)
+        full_text = _ocr_via_api(image_path)
+        if full_text.strip():
+            return _build_record(filename, full_text)
+
+    # No OCR available
+    return DrainageRecord(
+        source_filename=filename,
+        confidence=0.0,
+        warnings=["OCR indisponivel. Configure OCR_SPACE_API_KEY ou instale Tesseract localmente."],
     )
