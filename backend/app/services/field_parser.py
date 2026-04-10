@@ -128,7 +128,11 @@ FIELD_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
     ),
     (
         "tipo",
-        re.compile(r"Tipo\s*:?\s*([A-Za-z0-9/]+)", re.IGNORECASE),
+        re.compile(
+            r"Tipo\s*:?\s*(?!(?:Material|Ambiente|Estado|Conserva|Reparar|Limpeza|Implantar|REGULAR|BOM|RUIM|Prec[áa]rio|P[ée]ssimo)\b)"
+            r"([A-Za-z0-9/]+(?:\s+[A-Za-z0-9/]+)?)",
+            re.IGNORECASE,
+        ),
     ),
     (
         "estado_conservacao",

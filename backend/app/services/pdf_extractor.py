@@ -110,14 +110,14 @@ def _extract_with_pdfplumber(pdf_path: Path) -> tuple:
             if val:
                 merged[key] = val
 
-        # Check for Tipo separately (short label, needs care)
-        if not merged.get("tipo"):
-            for table in (page.extract_tables() if hasattr(page, 'extract_tables') else []):
-                for row in (table or []):
-                    cells = [c.strip() if c else "" for c in (row or [])]
-                    for i, cell in enumerate(cells):
-                        if cell.upper() in _TIPO_LABELS and len(cell) <= 6 and i + 1 < len(cells):
-                            merged["tipo"] = cells[i + 1]
+        # Check for Tipo separately — always prefer table value since the general text
+        # regex can capture "Material" when cells are merged in pdfplumber text output.
+        for table in (page.extract_tables() if hasattr(page, 'extract_tables') else []):
+            for row in (table or []):
+                cells = [c.strip() if c else "" for c in (row or [])]
+                for i, cell in enumerate(cells):
+                    if cell.upper() in _TIPO_LABELS and len(cell) <= 6 and i + 1 < len(cells) and cells[i + 1]:
+                        merged["tipo"] = cells[i + 1]
 
     return merged, warnings
 
@@ -175,7 +175,19 @@ def _extract_with_pdfminer(pdf_path: Path) -> tuple:
     combined_text = "\n".join(texts)
     label_fields = _extract_labels_from_text(combined_text)
     for key, val in label_fields.items():
-        if val and not best_merged.get(key):
+        if key == "tipo":
+            # Always prefer the specific MFC pattern — the general regex can capture
+            # "Material" when pdfminer merges adjacent form cells on the same line.
+            if val:
+                best_merged[key] = val
+        elif val and not best_merged.get(key):
+            best_merged[key] = val
+
+    # Robust coordinate extraction: handles pdfminer layouts where label and value
+    # are separated by other cell text (e.g. "Início Coordenada X: Fim Coordenada X:\n-18,...")
+    coord_fields = _extract_coords_robust(combined_text)
+    for key, val in coord_fields.items():
+        if val:
             best_merged[key] = val
 
     # Supplement with standalone keyword fallbacks
@@ -221,6 +233,34 @@ def _extract_labels_from_text(text: str) -> Dict[str, Optional[str]]:
         if match:
             fields[field_name] = match.group(1).strip()
     return fields
+
+
+def _extract_coords_robust(text: str) -> Dict[str, Optional[str]]:
+    """Robust coordinate extraction: find label, then scan ahead for the next signed decimal.
+
+    Handles pdfminer layouts where label and value land on different lines with
+    other text (e.g. another cell label) in between.
+    """
+    coords: Dict[str, Optional[str]] = {}
+    label_map = [
+        ("coord_x_inicio", re.compile(r"In[ií]cio\s+Coordenada\s+X", re.IGNORECASE)),
+        ("coord_y_inicio", re.compile(r"In[ií]cio\s+Coordenada\s+Y", re.IGNORECASE)),
+        ("coord_x_fim", re.compile(r"Fim\s+Coordenada\s+X", re.IGNORECASE)),
+        ("coord_y_fim", re.compile(r"Fim\s+Coordenada\s+Y", re.IGNORECASE)),
+    ]
+    for key, label_pat in label_map:
+        m = label_pat.search(text)
+        if not m:
+            continue
+        # Search in the next 200 characters for a signed decimal (Brazilian coords are negative)
+        window = text[m.end(): m.end() + 200]
+        num_m = re.search(r"-\d{1,3}[,.][\d,. ]{3,}", window)
+        if num_m:
+            # Take only the clean number part (stop at whitespace)
+            raw = re.match(r"-[\d.,]+", num_m.group(0).replace(" ", ""))
+            if raw:
+                coords[key] = raw.group(0)
+    return coords
 
 
 def _extract_standalone_values(text: str) -> Dict[str, Optional[str]]:
