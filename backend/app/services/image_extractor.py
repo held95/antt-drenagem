@@ -40,6 +40,67 @@ logger = logging.getLogger(__name__)
 # OCR.space Cloud API (fallback when Tesseract is not installed)
 # ---------------------------------------------------------------------------
 
+def _reassemble_two_column_text(raw_text: str) -> str:
+    """Reassemble two-column OCR text into 'LABEL: VALUE' lines.
+
+    OCR.space Engine 2 reads forms column-by-column, producing blocks of
+    labels (lines with ':') followed by blocks of values.
+    This function detects those blocks and pairs labels with values by order.
+    """
+    lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
+
+    def _is_label_line(line: str) -> bool:
+        """A line is a label if it ends with ':' or is a known label with ':'."""
+        if line.endswith(":"):
+            return True
+        # Handle "Material: NOISE TEXT" — label with OCR noise appended
+        for label in [
+            "IDENTIFICAÇÃO", "IDENTIFICACAO", "EXTENSÃO", "EXTENSAO",
+            "Largura", "Altura", "Inicio Coordenada", "Fim Coordenada",
+            "Tipo", "Material", "KM INICIAL", "KM FINAL",
+            "Estado de Conserva", "Ambiente", "Reparar", "Limpeza", "Implantar",
+        ]:
+            if line.lower().startswith(label.lower()) and ":" in line:
+                return True
+        return False
+
+    def _clean_label(line: str) -> str:
+        """Extract just the label part, removing OCR noise after the colon."""
+        # If line ends with ':', it's clean
+        if line.endswith(":"):
+            return line
+        # Otherwise extract up to and including the first ':'
+        idx = line.index(":")
+        return line[:idx + 1]
+
+    result_lines = []
+    i = 0
+    while i < len(lines):
+        # Collect a block of consecutive label lines
+        labels = []
+        while i < len(lines) and _is_label_line(lines[i]):
+            labels.append(_clean_label(lines[i]))
+            i += 1
+
+        if labels:
+            # Collect next N non-label lines as values
+            values = []
+            while i < len(lines) and not _is_label_line(lines[i]) and len(values) < len(labels):
+                values.append(lines[i])
+                i += 1
+            # Pair them
+            for j, label in enumerate(labels):
+                if j < len(values):
+                    result_lines.append("{} {}".format(label, values[j]))
+                else:
+                    result_lines.append(label)
+        else:
+            result_lines.append(lines[i])
+            i += 1
+
+    return "\n".join(result_lines)
+
+
 def _ocr_via_api(image_path: Path) -> str:
     """Send image to OCR.space free API and return extracted text."""
     api_key = settings.ocr_space_api_key
@@ -74,6 +135,11 @@ def _ocr_via_api(image_path: Path) -> str:
     body += ("--{}\r\n".format(boundary)).encode()
     body += b"Content-Disposition: form-data; name=\"detectOrientation\"\r\n\r\n"
     body += b"true\r\n"
+
+    # OCR Engine 2 — better for documents/forms
+    body += ("--{}\r\n".format(boundary)).encode()
+    body += b"Content-Disposition: form-data; name=\"OCREngine\"\r\n\r\n"
+    body += b"2\r\n"
 
     # File
     body += ("--{}\r\n".format(boundary)).encode()
@@ -189,8 +255,8 @@ OCR_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
         re.IGNORECASE,
     )),
     ("ambiente", re.compile(r"[Aa]mb\w*\s*[:\|]?\s*(URBANO|RURAL)", re.IGNORECASE)),
-    ("material", re.compile(r"[Mm]at\w*[li]a[li]\s*[:\|]?\s*(CONCRETO|ALVENARIA|METAL\w*|PEDRA|PVC)", re.IGNORECASE)),
-    ("tipo", re.compile(r"[Tt]i[op][eo]\s*[:\|]?\s*([A-Za-z]{2,4}[/\s]?[A-Za-z0-9]{1,4})", re.IGNORECASE)),
+    ("material", re.compile(r"[Mm]at\w*[li]a[li]\s*[:\|]?\s*(CONCRE.?O|ALVENARIA|METAL\w*|PEDRA|PVC)", re.IGNORECASE)),
+    ("tipo", re.compile(r"Tipo\s*[:\|]?\s*(MF?C\s*[/\s.]?\s*[A-Za-z0-9]{1,4})", re.IGNORECASE)),
     ("identificacao", re.compile(r"(MF\s*381\s*MG\s*\d{2,3}\+\d{2,3}\s*L?\s*\d?)", re.IGNORECASE)),
     ("inspection_date", re.compile(r"(?:Data|Insp|ata)\w*\.?\s*[:\|\]]?\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", re.IGNORECASE)),
     ("reparar", re.compile(r"[Rr]eparar\s*[:\|]?\s*(Sim|S[iI1]m|N[ãaÃA]o|Nao)", re.IGNORECASE)),
@@ -199,11 +265,12 @@ OCR_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
 ]
 
 OCR_FALLBACK_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
-    ("estado_conservacao", re.compile(r"\b(REGULAR|PREC[ÁA]RIO|P[ÉE]SSIMO)\b", re.IGNORECASE)),
-    ("ambiente", re.compile(r"\b(URBANO|RURAL)\b")),
-    ("material", re.compile(r"\b(CONCRETO|ALVENARIA)\b")),
-    ("tipo", re.compile(r"\b(MFC\s*[/\s]?\s*[A-Za-z0-9]{1,4})\b", re.IGNORECASE)),
+    ("estado_conservacao", re.compile(r"\b(REGULAR|PREC.?RIO|P.?SSIMO|BOM|RUIM|NOVO)\b", re.IGNORECASE)),
+    ("ambiente", re.compile(r"\b(URBANO|RURAL)\b", re.IGNORECASE)),
+    ("material", re.compile(r"\b(CONCRE.?O|ALVENARIA|METAL\w*|PEDRA|PVC)\b", re.IGNORECASE)),
+    ("tipo", re.compile(r"\b(M[FY][CG]\s*[/\s.]?\s*[A-Za-z0-9]{1,4})\b", re.IGNORECASE)),
     ("km_inicial", re.compile(r"\b(\d{3}\+\d{3})\b")),
+    ("identificacao", re.compile(r"(MF\s*381\s*MG\s*\d{2,3}\+\d{2,3}\s*L?\s*\d?)", re.IGNORECASE)),
 ]
 
 
@@ -236,19 +303,24 @@ def _extract_ocr_fields(text: str) -> Dict[str, Optional[str]]:
 # Main extraction function
 # ---------------------------------------------------------------------------
 
-def _build_record(filename: str, full_text: str) -> DrainageRecord:
+def _build_record(filename: str, full_text: str, use_standard_patterns: bool = True) -> DrainageRecord:
     """Build a DrainageRecord from OCR-extracted text."""
     warnings: List[str] = []
 
-    standard_fields = extract_fields_from_text(full_text)
     ocr_fields = _extract_ocr_fields(full_text)
 
-    merged: Dict[str, Optional[str]] = {}
-    all_keys = set(list(standard_fields.keys()) + list(ocr_fields.keys()))
-    for key in all_keys:
-        std_val = standard_fields.get(key)
-        ocr_val = ocr_fields.get(key)
-        merged[key] = std_val if std_val else ocr_val
+    if use_standard_patterns:
+        # Local Tesseract: text is single-line label:value, standard patterns work
+        standard_fields = extract_fields_from_text(full_text)
+        merged: Dict[str, Optional[str]] = {}
+        all_keys = set(list(standard_fields.keys()) + list(ocr_fields.keys()))
+        for key in all_keys:
+            std_val = standard_fields.get(key)
+            ocr_val = ocr_fields.get(key)
+            merged[key] = std_val if std_val else ocr_val
+    else:
+        # Cloud API: two-column text, standard patterns mismatch — use OCR only
+        merged = {k: v for k, v in ocr_fields.items()}
 
     confidence = compute_confidence(merged)
     if confidence < 0.5:
@@ -317,14 +389,14 @@ def extract_record_from_image(image_path: Path) -> DrainageRecord:
     if TESSERACT_AVAILABLE:
         full_text = _ocr_multipass(image_path)
         if full_text.strip():
-            return _build_record(filename, full_text)
+            return _build_record(filename, full_text, use_standard_patterns=True)
 
-    # Strategy 2: OCR.space cloud API
+    # Strategy 2: OCR.space cloud API (two-column text — only use OCR patterns)
     if settings.ocr_space_api_key:
         logger.info("%s: usando OCR.space API", filename)
         full_text = _ocr_via_api(image_path)
         if full_text.strip():
-            return _build_record(filename, full_text)
+            return _build_record(filename, full_text, use_standard_patterns=False)
 
     # No OCR available
     return DrainageRecord(
