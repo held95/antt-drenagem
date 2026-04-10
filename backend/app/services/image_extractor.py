@@ -12,8 +12,12 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import pytesseract
-from PIL import Image, ImageEnhance, ImageFilter
+try:
+    import pytesseract
+    from PIL import Image, ImageEnhance, ImageFilter
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
 
 from app.domain.drainage_record import DrainageRecord
 from app.services.field_parser import (
@@ -196,6 +200,14 @@ def extract_record_from_image(image_path: Path) -> DrainageRecord:
     """
     warnings: List[str] = []
     filename = image_path.name
+
+    if not OCR_AVAILABLE:
+        logger.error("pytesseract/Pillow nao instalado — OCR indisponivel")
+        return DrainageRecord(
+            source_filename=filename,
+            confidence=0.0,
+            warnings=["OCR indisponivel neste ambiente (pytesseract/Pillow nao instalado)"],
+        )
 
     logger.info("Processando imagem (OCR): %s", filename)
 
