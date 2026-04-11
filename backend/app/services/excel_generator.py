@@ -34,12 +34,12 @@ CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 COLUMNS: List[Tuple[str, int, str]] = [
     ("Estaca", 12, "Localização do Início"),
     ("Km", 12, "Localização do Início"),
-    ("Longitude", 16, "Localização do Início"),
-    ("Latitude", 16, "Localização do Início"),
+    ("Início Coordenada X", 18, "Localização do Início"),
+    ("Início Coordenada Y", 18, "Localização do Início"),
     ("Estaca", 12, "Localização do Fim"),
     ("Km", 12, "Localização do Fim"),
-    ("Longitude", 16, "Localização do Fim"),
-    ("Latitude", 16, "Localização do Fim"),
+    ("Fim Coordenada X", 18, "Localização do Fim"),
+    ("Fim Coordenada Y", 18, "Localização do Fim"),
     ("Largura", 10, "Dimensões"),
     ("Altura", 10, "Dimensões"),
     ("Extensão", 12, "Dimensões"),
@@ -145,12 +145,12 @@ def generate_excel(
         row_data = [
             record.estaca_inicio,
             record.km_inicial,
-            record.longitude_inicio,
-            record.latitude_inicio,
+            record.latitude_inicio,   # Início Coordenada X (~-18.xxx)
+            record.longitude_inicio,  # Início Coordenada Y (~-42.xxx)
             record.estaca_fim,
             record.km_final,
-            record.longitude_fim,
-            record.latitude_fim,
+            record.latitude_fim,      # Fim Coordenada X (~-18.xxx)
+            record.longitude_fim,     # Fim Coordenada Y (~-42.xxx)
             record.largura,
             record.altura,
             record.extensao,

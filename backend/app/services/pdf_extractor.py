@@ -73,6 +73,7 @@ _LABEL_MAP: List[tuple] = [
     ("EXTENSÃO", "extensao"),
     ("EXTENSAO", "extensao"),
     ("LARGURA", "largura"),
+    ("LARGURA(M)", "largura"),
     ("ALTURA", "altura"),
     ("IDENTIFICAÇÃO", "identificacao"),
     ("IDENTIFICACAO", "identificacao"),
@@ -207,7 +208,7 @@ _PDFMINER_LABEL_PATTERNS: List[tuple] = [
     ("km_inicial", re.compile(r"KM\s*INICIAL\s*[:\s]*([\d]+\+[\d]+)", re.IGNORECASE)),
     ("km_final", re.compile(r"KM\s*FINAL\s*[:\s]*([\d]+\+[\d]+)", re.IGNORECASE)),
     ("extensao", re.compile(r"EXTENS[ÃA]O\s*\(?m?\)?\s*[:\s]*([\d.,]+)", re.IGNORECASE)),
-    ("largura", re.compile(r"Largura\s*\(?m?\)?\s*[:\s]*([\d.,]+)", re.IGNORECASE)),
+    ("largura", re.compile(r"Largura\s*[\(（]?\s*m?\s*[\)）]?\s*[:\s]*([\d.,]+)", re.IGNORECASE)),
     ("altura", re.compile(r"Altura\s*\(?m?\)?\s*[:\s]*([\d.,]+)", re.IGNORECASE)),
     ("coord_x_inicio", re.compile(r"In[ií]cio\s*Coordenada\s*X\s*[:\s]*([-\d.,]+)", re.IGNORECASE)),
     ("coord_y_inicio", re.compile(r"In[ií]cio\s*Coordenada\s*Y\s*[:\s]*([-\d.,]+)", re.IGNORECASE)),
@@ -239,10 +240,14 @@ def _extract_labels_from_text(text: str) -> Dict[str, Optional[str]]:
 
 
 def _extract_coords_robust(text: str) -> Dict[str, Optional[str]]:
-    """Robust coordinate extraction: find label, then scan ahead for the next signed decimal.
+    """Robust coordinate extraction: find label, then scan ahead for the best signed decimal.
 
     Handles pdfminer layouts where label and value land on different lines with
     other text (e.g. another cell label) in between.
+
+    Uses geographic bounds to discriminate X (latitude, -34..6) from Y (longitude,
+    -74..-34), avoiding the common bug where a two-column form places Y values
+    before X values in the extracted text stream.
     """
     coords: Dict[str, Optional[str]] = {}
     label_map = [
@@ -251,18 +256,51 @@ def _extract_coords_robust(text: str) -> Dict[str, Optional[str]]:
         ("coord_x_fim", re.compile(r"Fim\s+Coordenada\s+X", re.IGNORECASE)),
         ("coord_y_fim", re.compile(r"Fim\s+Coordenada\s+Y", re.IGNORECASE)),
     ]
+    # coord_x = latitude-like: -34 to 6; coord_y = longitude-like: -74 to -34
+    # Values may also appear scaled (e.g. -1891559 → -18.91559), so we check after normalization
+    preferred_bounds = {
+        "coord_x_inicio": (-34.0, 6.0),
+        "coord_x_fim":    (-34.0, 6.0),
+        "coord_y_inicio": (-74.0, -34.0),
+        "coord_y_fim":    (-74.0, -34.0),
+    }
     for key, label_pat in label_map:
         m = label_pat.search(text)
         if not m:
             continue
-        # Search in the next 200 characters for a signed decimal (Brazilian coords are negative)
-        window = text[m.end(): m.end() + 200]
-        num_m = re.search(r"-\d{1,3}[,.][\d,. ]{3,}", window)
-        if num_m:
-            # Take only the clean number part (stop at whitespace)
-            raw = re.match(r"-[\d.,]+", num_m.group(0).replace(" ", ""))
-            if raw:
-                coords[key] = raw.group(0)
+        # Collect all signed decimals in the next 300 characters
+        window = text[m.end(): m.end() + 300]
+        candidates = re.finditer(r"-\d{1,10}[,.][\d,. ]{1,}", window)
+        lo, hi = preferred_bounds[key]
+        best: Optional[str] = None
+        fallback: Optional[str] = None
+        for cand_m in candidates:
+            raw_match = re.match(r"-[\d.,]+", cand_m.group(0).replace(" ", ""))
+            if not raw_match:
+                continue
+            raw = raw_match.group(0)
+            # Parse to float for bounds checking (handle Brazilian comma-decimal)
+            cleaned = raw.replace(",", ".")
+            # Remove extra dots (1.234.56 → shouldn't happen but guard anyway)
+            try:
+                val = float(cleaned)
+            except ValueError:
+                continue
+            # Normalize scaled values (e.g. -1891559 → try dividing by 10^n)
+            if abs(val) > 180:
+                from app.services.field_parser import normalize_coordinate
+                val_norm = normalize_coordinate(val)
+                if val_norm is None:
+                    continue
+            else:
+                val_norm = val
+            # Prefer the first candidate that falls within the expected bounds
+            if fallback is None:
+                fallback = raw  # keep first match as fallback regardless of bounds
+            if lo <= val_norm <= hi:
+                best = raw
+                break
+        coords[key] = best if best is not None else fallback
     return coords
 
 
@@ -299,6 +337,35 @@ def _extract_standalone_values(text: str) -> Dict[str, Optional[str]]:
         fields["identificacao"] = match.group(1).strip()
 
     return fields
+
+
+def _auto_correct_coord_pair(
+    coord_x: Optional[float], coord_y: Optional[float]
+) -> tuple:
+    """Detect and fix swapped X/Y coordinates using Brazilian geographic bounds.
+
+    coord_x should be latitude-like (-34 to 6), coord_y should be longitude-like (-74 to -34).
+    Handles two common extraction failures from two-column PDF forms:
+    - Only coord_x extracted but its value is actually a longitude → move to coord_y
+    - Both extracted but swapped → swap them back
+    """
+    def is_lat(v: Optional[float]) -> bool:
+        return v is not None and -34.0 <= v <= 6.0
+
+    def is_lon(v: Optional[float]) -> bool:
+        return v is not None and -74.0 <= v <= -34.0
+
+    # Only coord_x found, but it looks like a longitude value → belongs in coord_y
+    if coord_x is not None and coord_y is None and is_lon(coord_x):
+        logger.debug("Coordenada X parece longitude (%s) — movendo para coord_y", coord_x)
+        return None, coord_x
+
+    # Both present but reversed (X is longitude range, Y is latitude range)
+    if is_lon(coord_x) and is_lat(coord_y):
+        logger.debug("Coordenadas X/Y invertidas — corrigindo swap (%s, %s)", coord_x, coord_y)
+        return coord_y, coord_x
+
+    return coord_x, coord_y
 
 
 def extract_record(pdf_path: Path) -> DrainageRecord:
@@ -338,6 +405,10 @@ def extract_record(pdf_path: Path) -> DrainageRecord:
     lon_inicio = normalize_coordinate(parse_brazilian_float(merged.get("coord_y_inicio")))
     lat_fim = normalize_coordinate(parse_brazilian_float(merged.get("coord_x_fim")))
     lon_fim = normalize_coordinate(parse_brazilian_float(merged.get("coord_y_fim")))
+
+    # Auto-correct swapped X/Y pairs (common in two-column PDF form extractions)
+    lat_inicio, lon_inicio = _auto_correct_coord_pair(lat_inicio, lon_inicio)
+    lat_fim, lon_fim = _auto_correct_coord_pair(lat_fim, lon_fim)
 
     # Validate coordinates are within Brazil
     warnings.extend(validate_brazil_coordinate(lat_inicio, lon_inicio))
