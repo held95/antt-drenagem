@@ -244,7 +244,7 @@ OCR_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
     ("km_inicial", re.compile(r"(?:KM|km|Km).?(?:INICIAL|INIC\w*|IN\w*)\s*[:\|]?\s*(\d{2,3}\+\d{2,3})", re.IGNORECASE)),
     ("km_final", re.compile(r"(?:KM|km|Km).?(?:FINAL|FIN\w*)\s*[:\|]?\s*(\d{2,3}\+\d{2,3})", re.IGNORECASE)),
     ("extensao", re.compile(r"[EÉe]xt?ens\w*\s*\(?m?\)?\s*[:\|]?\s*([\d.,]+)", re.IGNORECASE)),
-    ("largura", re.compile(r"[Ll]argura\s*\(?m?\)?\s*[:\|]?\s*([\d.,]+)", re.IGNORECASE)),
+    ("largura", re.compile(r"[Ll]argura\s*\(?m?\)?\s*[=:\|]?\s*([\d.,]+)", re.IGNORECASE)),
     ("altura", re.compile(r"[Aa]ltura\s*\(?m?\)?\s*[:\|]?\s*([\d.,]+)", re.IGNORECASE)),
     ("coord_x_inicio", re.compile(r"[Ii]n\w{0,6}\s*[CcGg]oord\w*\s*[Xx]\s*[:\|]?\s*([-\d.,]+)", re.IGNORECASE)),
     ("coord_y_inicio", re.compile(r"[Ii]n\w{0,6}\s*[CcGg]oord\w*\s*[Yy]\s*[:\|]?\s*([-\d.,]+)", re.IGNORECASE)),

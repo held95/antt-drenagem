@@ -104,7 +104,7 @@ FIELD_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
     ),
     (
         "largura",
-        re.compile(r"Largura\s*[\(（]?\s*m?\s*[\)）]?\s*:?\s*([\d.,]+)", re.IGNORECASE),
+        re.compile(r"Largura\s*[\(（]?\s*m?\s*[\)）]?\s*[=:]?\s*([\d.,]+)", re.IGNORECASE),
     ),
     (
         "altura",

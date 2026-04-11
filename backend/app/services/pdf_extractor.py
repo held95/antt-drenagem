@@ -117,7 +117,7 @@ def _extract_with_pdfplumber(pdf_path: Path) -> tuple:
             for row in (table or []):
                 cells = [c.strip() if c else "" for c in (row or [])]
                 for i, cell in enumerate(cells):
-                    if cell.upper() in _TIPO_LABELS and len(cell) <= 6:
+                    if cell.upper().rstrip(":").strip() in _TIPO_LABELS and len(cell.rstrip(":").strip()) <= 6:
                         for j in range(i + 1, min(len(cells), i + 3)):
                             if cells[j] and re.match(r"MF?C", cells[j], re.IGNORECASE):
                                 merged["tipo"] = cells[j]
@@ -208,7 +208,7 @@ _PDFMINER_LABEL_PATTERNS: List[tuple] = [
     ("km_inicial", re.compile(r"KM\s*INICIAL\s*[:\s]*([\d]+\+[\d]+)", re.IGNORECASE)),
     ("km_final", re.compile(r"KM\s*FINAL\s*[:\s]*([\d]+\+[\d]+)", re.IGNORECASE)),
     ("extensao", re.compile(r"EXTENS[ÃA]O\s*\(?m?\)?\s*[:\s]*([\d.,]+)", re.IGNORECASE)),
-    ("largura", re.compile(r"Largura\s*[\(（]?\s*m?\s*[\)）]?\s*[:\s]*([\d.,]+)", re.IGNORECASE)),
+    ("largura", re.compile(r"Largura\s*[\(（]?\s*m?\s*[\)）]?\s*[=:\s]*([\d.,]+)", re.IGNORECASE)),
     ("altura", re.compile(r"Altura\s*\(?m?\)?\s*[:\s]*([\d.,]+)", re.IGNORECASE)),
     ("coord_x_inicio", re.compile(r"In[ií]cio\s*Coordenada\s*X\s*[:\s]*([-\d.,]+)", re.IGNORECASE)),
     ("coord_y_inicio", re.compile(r"In[ií]cio\s*Coordenada\s*Y\s*[:\s]*([-\d.,]+)", re.IGNORECASE)),
