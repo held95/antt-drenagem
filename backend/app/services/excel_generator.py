@@ -199,3 +199,116 @@ def generate_excel(
     buffer = BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Custom column Excel generation (for user-configured column sets)
+# ---------------------------------------------------------------------------
+
+def generate_excel_custom(
+    records_data: List[dict],
+    columns: List[dict],
+    highway_name: str = "BR-381/MG Trecho Entr° BR-116/MG (Governador Valadares) - Entr° Belo Horizonte",
+) -> bytes:
+    """Generate Excel with a user-configured column list.
+
+    Args:
+        records_data: List of dicts (DrainageRecordData serialized).
+        columns: List of {field, label, group} dicts defining columns in order.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Drenagem Superficial"
+
+    num_cols = len(columns)
+
+    # Sort records by km_inicial
+    sorted_records = sorted(
+        records_data,
+        key=lambda r: _parse_km_sort_key(r.get("km_inicial")),
+    )
+
+    # -- Row 1: Title --
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
+    title_cell = ws.cell(row=1, column=1, value="Rodovia: {}".format(highway_name))
+    title_cell.font = TITLE_FONT
+    title_cell.alignment = CENTER
+    for col_idx in range(1, num_cols + 1):
+        ws.cell(row=1, column=col_idx).border = THIN_BORDER
+
+    # -- Row 2: Group headers --
+    # Identify contiguous group spans
+    groups: List[Tuple[str, int, int]] = []
+    current_group = columns[0]["group"] if columns else ""
+    group_start = 1
+    for i, col in enumerate(columns):
+        g = col["group"]
+        if g != current_group:
+            if current_group:
+                groups.append((current_group, group_start, i))
+            current_group = g
+            group_start = i + 1
+        if i == len(columns) - 1:
+            if current_group:
+                groups.append((current_group, group_start, i + 1))
+
+    for group_name, start_col, end_col in groups:
+        if start_col < end_col:
+            ws.merge_cells(start_row=2, start_column=start_col, end_row=2, end_column=end_col)
+        _apply_cell_style(ws, 2, start_col, group_name, font=HEADER_FONT, fill=HEADER_FILL)
+
+    # Fill ungrouped header cells in row 2 (merge rows 2-3 for standalone columns)
+    for col_idx, col in enumerate(columns, 1):
+        cell = ws.cell(row=2, column=col_idx)
+        cell.border = THIN_BORDER
+        cell.fill = HEADER_FILL
+        if not col["group"]:
+            ws.merge_cells(start_row=2, start_column=col_idx, end_row=3, end_column=col_idx)
+            cell.value = col["label"]
+            cell.font = HEADER_FONT
+            cell.alignment = CENTER
+
+    # -- Row 3: Sub-headers --
+    for col_idx, col in enumerate(columns, 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = 16
+        if col["group"]:
+            _apply_cell_style(ws, 3, col_idx, col["label"], font=HEADER_FONT, fill=HEADER_FILL)
+        else:
+            ws.cell(row=3, column=col_idx).border = THIN_BORDER
+
+    # Coordinate field keys for number formatting
+    coord_fields = {"latitude_inicio", "longitude_inicio", "latitude_fim", "longitude_fim"}
+
+    # -- Row 4+: Data rows --
+    for row_offset, record in enumerate(sorted_records):
+        row_num = 4 + row_offset
+        for col_idx, col in enumerate(columns, 1):
+            value = record.get(col["field"])
+            # Convert bool to human-readable
+            if isinstance(value, bool):
+                value = "Sim" if value else "Não"
+            fmt = None
+            if isinstance(value, float):
+                if col["field"] in coord_fields:
+                    fmt = "0.000000"
+                else:
+                    fmt = "0.00"
+            _apply_cell_style(ws, row_num, col_idx, value, number_format=fmt)
+
+    # -- Metadata sheet --
+    ws_meta = wb.create_sheet("Metadados")
+    ws_meta.column_dimensions["A"].width = 30
+    ws_meta.column_dimensions["B"].width = 50
+    meta_data = [
+        ("Data de geração", datetime.now().strftime("%d/%m/%Y %H:%M:%S")),
+        ("Total de registros", len(sorted_records)),
+        ("Rodovia", highway_name),
+        ("Colunas incluídas", len(columns)),
+    ]
+    for row_idx, (label, value) in enumerate(meta_data, 1):
+        _apply_cell_style(ws_meta, row_idx, 1, label, font=HEADER_FONT, alignment=Alignment(horizontal="left"))
+        _apply_cell_style(ws_meta, row_idx, 2, value, alignment=Alignment(horizontal="left"))
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()

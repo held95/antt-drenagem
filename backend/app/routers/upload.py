@@ -16,7 +16,15 @@ from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from app.config import settings
-from app.models import FileResultResponse, JobStatusResponse, ProcessResponse, UploadResponse
+from app.models import (
+    DrainageRecordData,
+    FileResultResponse,
+    GenerateExcelRequest,
+    JobStatusResponse,
+    ProcessResponse,
+    UploadResponse,
+)
+from app.services.excel_generator import generate_excel_custom
 from app.services.processing_pipeline import JobState, process_batch
 
 logger = logging.getLogger(__name__)
@@ -236,14 +244,74 @@ async def process_files(files: List[UploadFile]):
         if job_state.excel_bytes:
             excel_b64 = base64.b64encode(job_state.excel_bytes).decode("ascii")
 
+        # Serialize extracted records for the frontend preview
+        record_data_list = [
+            DrainageRecordData(
+                source_filename=fr.record.source_filename,
+                inspection_date=fr.record.inspection_date,
+                identificacao=fr.record.identificacao,
+                estaca_inicio=fr.record.estaca_inicio,
+                km_inicial=fr.record.km_inicial,
+                latitude_inicio=fr.record.latitude_inicio,
+                longitude_inicio=fr.record.longitude_inicio,
+                estaca_fim=fr.record.estaca_fim,
+                km_final=fr.record.km_final,
+                latitude_fim=fr.record.latitude_fim,
+                longitude_fim=fr.record.longitude_fim,
+                largura=fr.record.largura,
+                altura=fr.record.altura,
+                extensao=fr.record.extensao,
+                tipo=fr.record.tipo,
+                estado_conservacao=fr.record.estado_conservacao,
+                material=fr.record.material,
+                ambiente=fr.record.ambiente,
+                reparar=fr.record.reparar,
+                limpeza=fr.record.limpeza,
+                limpeza_extensao=fr.record.limpeza_extensao,
+                implantar=fr.record.implantar,
+                confidence=fr.record.confidence,
+            )
+            for fr in job_state.file_results
+            if fr.record is not None
+        ]
+
         return ProcessResponse(
             total_files=len(file_paths),
             successful_files=successful,
             files=file_results,
             excel_base64=excel_b64,
+            records=record_data_list,
         )
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+@router.post("/generate-excel")
+async def generate_excel_endpoint(request: GenerateExcelRequest):
+    """Generate an Excel file with a custom column configuration.
+
+    Accepts the serialized records (from /api/process) and a column list
+    chosen by the user. Returns the .xlsx file as a binary response.
+    """
+    if not request.records:
+        raise HTTPException(status_code=400, detail="Nenhum registro fornecido")
+    if not request.columns:
+        raise HTTPException(status_code=400, detail="Nenhuma coluna selecionada")
+
+    records_dicts = [r.model_dump() for r in request.records]
+    columns_dicts = [c.model_dump() for c in request.columns]
+
+    try:
+        excel_bytes = generate_excel_custom(records_dicts, columns_dicts)
+    except Exception as e:
+        logger.exception("Erro ao gerar Excel customizado")
+        raise HTTPException(status_code=500, detail="Erro ao gerar Excel: {}".format(e))
+
+    return Response(
+        content=excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="drenagem_consolidado.xlsx"'},
+    )
 
 
 @router.delete("/job/{job_id}")

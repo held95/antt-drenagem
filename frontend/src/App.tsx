@@ -56,7 +56,13 @@ export default function App() {
     <div className="flex min-h-screen flex-col">
       <Header />
 
-      <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-8">
+      <main
+        className={
+          appState === "completed"
+            ? "mx-auto w-full max-w-full flex-1 px-4 py-8"
+            : "mx-auto w-full max-w-3xl flex-1 px-6 py-8"
+        }
+      >
         {/* Upload section */}
         {appState === "idle" && (
           <div className="space-y-4">
@@ -80,6 +86,7 @@ export default function App() {
             {files.length > 0 && (
               <div className="flex justify-center">
                 <button
+                  type="button"
                   onClick={handleProcess}
                   className="flex items-center gap-2 rounded-lg bg-primary px-8 py-3 font-medium text-white shadow transition-colors hover:bg-primary-light disabled:opacity-50"
                 >
@@ -106,6 +113,7 @@ export default function App() {
             )}
             <div className="flex justify-center">
               <button
+                type="button"
                 onClick={handleReset}
                 className="rounded-lg border border-gray-300 bg-white px-6 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
               >
