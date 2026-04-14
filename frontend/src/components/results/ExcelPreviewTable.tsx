@@ -31,21 +31,40 @@ export function ExcelPreviewTable({
 
   function handleHeaderDrop(e: React.DragEvent, targetIndex: number) {
     e.preventDefault();
+
+    // Case 1: reorder between existing headers
     const sourceIndexStr = e.dataTransfer.getData("reorderColIndex");
-    if (sourceIndexStr === "") return; // came from unmapped panel, handled by drop zone
-    const sourceIndex = parseInt(sourceIndexStr, 10);
-    if (isNaN(sourceIndex) || sourceIndex === targetIndex) return;
-    const next = [...columns];
-    const [moved] = next.splice(sourceIndex, 1);
-    next.splice(targetIndex, 0, moved);
-    onColumnsChange(next);
+    if (sourceIndexStr !== "") {
+      const sourceIndex = parseInt(sourceIndexStr, 10);
+      if (isNaN(sourceIndex) || sourceIndex === targetIndex) return;
+      const next = [...columns];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      onColumnsChange(next);
+      return;
+    }
+
+    // Case 2: chip from unmapped panel → insert before targetIndex
+    const raw = e.dataTransfer.getData("columnDef");
+    if (!raw) return;
+    try {
+      const col: ColumnDef = JSON.parse(raw);
+      if (columns.some((c) => c.field === col.field)) return;
+      const next = [...columns];
+      next.splice(targetIndex, 0, col);
+      onColumnsChange(next);
+    } catch {
+      // ignore malformed data
+    }
   }
 
   function handleHeaderDragOver(e: React.DragEvent) {
-    // Only allow if it's a reorder drag (not from unmapped panel)
-    if (e.dataTransfer.types.includes("reordercolindex")) {
+    if (
+      e.dataTransfer.types.includes("reordercolindex") ||
+      e.dataTransfer.types.includes("columndef")
+    ) {
       e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
+      e.dataTransfer.dropEffect = e.dataTransfer.types.includes("columndef") ? "copy" : "move";
     }
   }
 
