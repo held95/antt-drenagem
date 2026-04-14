@@ -40,9 +40,9 @@ COLUMNS: List[Tuple[str, int, str]] = [
     ("Km", 12, "Localização do Fim"),
     ("Fim Coordenada X", 18, "Localização do Fim"),
     ("Fim Coordenada Y", 18, "Localização do Fim"),
-    ("Largura", 10, "Dimensões"),
     ("Altura", 10, "Dimensões"),
     ("Extensão", 12, "Dimensões"),
+    ("Largura", 10, "Dimensões"),
     ("Tipo", 12, ""),
     ("Estado de Conservação", 20, ""),
     ("Ambiente", 12, ""),
@@ -151,9 +151,9 @@ def generate_excel(
             record.km_final,
             record.latitude_fim,      # Fim Coordenada X (~-18.xxx)
             record.longitude_fim,     # Fim Coordenada Y (~-42.xxx)
-            record.largura,
             record.altura,
             record.extensao,
+            record.largura,
             record.tipo,
             record.estado_conservacao,
             record.ambiente,

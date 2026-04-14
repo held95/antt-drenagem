@@ -129,8 +129,11 @@ FIELD_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
     (
         "tipo",
         re.compile(
-            r"Tipo\s*:?\s*(?!(?:Material|Ambiente|Estado|Conserva|Reparar|Limpeza|Implantar|REGULAR|BOM|RUIM|Prec[áa]rio|P[ée]ssimo)\b)"
-            r"([A-Za-z0-9/]+(?:\s+[A-Za-z0-9/]+)?)",
+            r"Tipo\s*:?\s*"
+            r"(?!(?:Material|Ambiente|Estado|Conserva|Reparar|Limpeza|Implantar|"
+            r"REGULAR|BOM|RUIM|Prec[áa]rio|P[ée]ssimo|"
+            r"CONCRETO|METAL|PL[ÁA]STICO|HDPE|PVC|ARGAMASSA)\b)"
+            r"([A-Za-z0-9/]+(?:\s+(?!(?:Estado|Material|Ambiente|Conserva|Reparar|Limpeza|Implantar|de)\b)[A-Za-z0-9]+)?)",
             re.IGNORECASE,
         ),
     ),
