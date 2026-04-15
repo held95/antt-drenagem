@@ -93,13 +93,12 @@ _TIPO_LABELS = ("TIPO",)
 
 
 def _extract_with_pdfplumber(pdf_path: Path) -> tuple:
-    """Extract using pdfplumber (table + text). Returns (merged_fields, warnings)."""
+    """Extract using pdfplumber (table + text). Returns (merged_fields, warnings, raw_text)."""
     warnings: List[str] = []
-    filename = pdf_path.name
 
     with pdfplumber.open(pdf_path) as pdf:
         if not pdf.pages:
-            return {}, ["PDF sem páginas"]
+            return {}, ["PDF sem páginas"], ""
 
         page = pdf.pages[0]
         table_fields = _extract_from_tables(page)
@@ -123,7 +122,7 @@ def _extract_with_pdfplumber(pdf_path: Path) -> tuple:
                                 merged["tipo"] = cells[j]
                                 break
 
-    return merged, warnings
+    return merged, warnings, full_text
 
 
 def _extract_with_pdfminer(pdf_path: Path) -> tuple:
@@ -161,7 +160,7 @@ def _extract_with_pdfminer(pdf_path: Path) -> tuple:
             logger.debug("pdfminer extraction failed with params: %s", e)
 
     if not texts:
-        return {}, ["PDF sem texto extraivel"]
+        return {}, ["PDF sem texto extraivel"], ""
 
     # Try standard regex on each text variant, keep the one with most fields
     best_merged: Dict[str, Optional[str]] = {}
@@ -200,7 +199,7 @@ def _extract_with_pdfminer(pdf_path: Path) -> tuple:
         if val and not best_merged.get(key):
             best_merged[key] = val
 
-    return best_merged, []
+    return best_merged, [], combined_text
 
 
 # Label patterns for pdfminer text where label and value may be on same or different lines
@@ -380,9 +379,9 @@ def extract_record(pdf_path: Path) -> DrainageRecord:
     logger.info("Processando: %s", filename)
 
     if PDFPLUMBER_AVAILABLE:
-        merged, extract_warnings = _extract_with_pdfplumber(pdf_path)
+        merged, extract_warnings, raw_text = _extract_with_pdfplumber(pdf_path)
     else:
-        merged, extract_warnings = _extract_with_pdfminer(pdf_path)
+        merged, extract_warnings, raw_text = _extract_with_pdfminer(pdf_path)
 
     warnings.extend(extract_warnings)
 
@@ -395,6 +394,24 @@ def extract_record(pdf_path: Path) -> DrainageRecord:
 
     # Build the record
     confidence = compute_confidence(merged)
+
+    # LLM gap-fill: preenche campos None quando confiança é baixa e API key configurada
+    from app.config import settings
+    if settings.anthropic_api_key and confidence < settings.llm_confidence_threshold and raw_text:
+        from app.services.llm_extractor import extract_missing_fields
+        llm_fields = extract_missing_fields(
+            text=raw_text,
+            existing_fields=merged,
+            api_key=settings.anthropic_api_key,
+            model=settings.llm_model,
+        )
+        if llm_fields:
+            merged.update(llm_fields)
+            confidence = compute_confidence(merged)
+            warnings.append(
+                f"LLM complementou {len(llm_fields)} campo(s): {', '.join(llm_fields)}"
+            )
+
     if confidence < 0.5:
         warnings.append(
             f"Baixa confiança na extração ({confidence:.0%}) — verifique manualmente"

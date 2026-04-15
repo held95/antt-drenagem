@@ -32,21 +32,32 @@ CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 # Column definitions: (sub_header, width, group)
 COLUMNS: List[Tuple[str, int, str]] = [
-    ("Estaca", 12, "Localização do Início"),
-    ("Km", 12, "Localização do Início"),
-    ("Início Coordenada X", 18, "Localização do Início"),
-    ("Início Coordenada Y", 18, "Localização do Início"),
-    ("Estaca", 12, "Localização do Fim"),
-    ("Km", 12, "Localização do Fim"),
-    ("Fim Coordenada X", 18, "Localização do Fim"),
-    ("Fim Coordenada Y", 18, "Localização do Fim"),
-    ("Altura", 10, "Dimensões"),
-    ("Largura", 12, "Dimensões"),
-    ("Extensão", 10, "Dimensões"),
-    ("Tipo", 12, ""),
+    ("Data Insp.",            14, "Identificação"),
+    ("Identificação",         28, "Identificação"),
+    ("Estaca",                12, "Localização do Início"),
+    ("Km",                    12, "Localização do Início"),
+    ("Início Coordenada X",   18, "Localização do Início"),
+    ("Início Coordenada Y",   18, "Localização do Início"),
+    ("Estaca",                12, "Localização do Fim"),
+    ("Km",                    12, "Localização do Fim"),
+    ("Fim Coordenada X",      18, "Localização do Fim"),
+    ("Fim Coordenada Y",      18, "Localização do Fim"),
+    ("Altura",                10, "Dimensões"),
+    ("Largura",               12, "Dimensões"),
+    ("Extensão",              10, "Dimensões"),
+    ("Tipo",                  12, ""),
     ("Estado de Conservação", 20, ""),
-    ("Ambiente", 12, ""),
+    ("Ambiente",              12, ""),
+    ("Material",              14, ""),
+    ("Reparar",               10, "Diagnóstico"),
+    ("Limpeza",               10, "Diagnóstico"),
+    ("Ext. Limpeza (m)",      14, "Diagnóstico"),
+    ("Implantar",             10, "Diagnóstico"),
 ]
+
+# Coordinate column indices (1-based) — computed dynamically to survive future column reorders
+_COORD_NAMES = {"Início Coordenada X", "Início Coordenada Y", "Fim Coordenada X", "Fim Coordenada Y"}
+_COORD_COL_INDICES = {i + 1 for i, (name, _, _) in enumerate(COLUMNS) if name in _COORD_NAMES}
 
 
 def _apply_cell_style(ws, row: int, col: int, value, font=DATA_FONT,
@@ -143,6 +154,8 @@ def generate_excel(
     for row_offset, record in enumerate(sorted_records):
         row_num = 4 + row_offset
         row_data = [
+            record.inspection_date,
+            record.identificacao,
             record.estaca_inicio,
             record.km_inicial,
             record.latitude_inicio,   # Início Coordenada X (~-18.xxx)
@@ -152,16 +165,21 @@ def generate_excel(
             record.latitude_fim,      # Fim Coordenada X (~-18.xxx)
             record.longitude_fim,     # Fim Coordenada Y (~-42.xxx)
             record.altura,
-            record.extensao,
             record.largura,
+            record.extensao,
             record.tipo,
             record.estado_conservacao,
             record.ambiente,
+            record.material,
+            "Sim" if record.reparar is True else ("Não" if record.reparar is False else None),
+            "Sim" if record.limpeza is True else ("Não" if record.limpeza is False else None),
+            record.limpeza_extensao,
+            "Sim" if record.implantar is True else ("Não" if record.implantar is False else None),
         ]
         for col_idx, value in enumerate(row_data, 1):
             fmt = None
             if isinstance(value, float):
-                if col_idx in (3, 4, 7, 8):  # Latitude/Longitude columns
+                if col_idx in _COORD_COL_INDICES:  # Latitude/Longitude columns
                     fmt = "0.000000"
                 else:
                     fmt = "0.00"

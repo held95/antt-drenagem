@@ -60,18 +60,18 @@ class TestGenerateExcel:
     def test_data_starts_row_4(self):
         wb = _load_wb(generate_excel([_make_record()]))
         ws = wb.active
-        assert ws.cell(4, 1).value == "156+080"  # estaca_inicio
+        assert ws.cell(4, 3).value == "156+080"  # estaca_inicio (col 3, after Data Insp. and Identificação)
 
     def test_coordinate_format(self):
         wb = _load_wb(generate_excel([_make_record()]))
         ws = wb.active
-        cell = ws.cell(4, 3)  # latitude_inicio column
+        cell = ws.cell(4, 5)  # latitude_inicio column (col 5, after Data Insp., Identificação, Estaca, Km)
         assert cell.number_format == "0.000000"
 
     def test_dimension_format(self):
         wb = _load_wb(generate_excel([_make_record()]))
         ws = wb.active
-        cell = ws.cell(4, 9)  # largura column
+        cell = ws.cell(4, 11)  # Altura column (col 11, after 2 id + 4 início + 4 fim)
         assert cell.number_format == "0.00"
 
     def test_multiple_records(self):
@@ -82,10 +82,10 @@ class TestGenerateExcel:
         ]
         wb = _load_wb(generate_excel(records))
         ws = wb.active
-        # Should be sorted by km_inicial
-        assert ws.cell(4, 2).value == "100+000"
-        assert ws.cell(5, 2).value == "150+000"
-        assert ws.cell(6, 2).value == "200+000"
+        # Should be sorted by km_inicial — Km (Início) is now col 4
+        assert ws.cell(4, 4).value == "100+000"
+        assert ws.cell(5, 4).value == "150+000"
+        assert ws.cell(6, 4).value == "200+000"
 
     def test_metadata_sheet(self):
         wb = _load_wb(generate_excel([_make_record()]))
